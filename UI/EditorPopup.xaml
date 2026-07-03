@@ -1,0 +1,40 @@
+<Window x:Class="UNICUT.UI.EditorPopup"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="UNICUT Editor" Height="600" Width="800"
+        WindowStartupLocation="CenterScreen"
+        Topmost="True"
+        Loaded="Window_Loaded">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="50"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Toolbar -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Background="#2D2D30">
+            <Button Content="Copy Path" Click="BtnCopyPath_Click" Margin="5" Padding="10,5"/>
+            <Button Content="Open Folder" Click="BtnOpenFolder_Click" Margin="5" Padding="10,5"/>
+            <Separator Margin="10,5" Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" />
+            
+            <RadioButton Content="Draw" x:Name="RbDraw" IsChecked="True" GroupName="Tools" Margin="5" Foreground="White" VerticalAlignment="Center"/>
+            <RadioButton Content="Rectangle" x:Name="RbRectangle" GroupName="Tools" Margin="5" Foreground="White" VerticalAlignment="Center"/>
+            <RadioButton Content="Text" x:Name="RbText" GroupName="Tools" Margin="5" Foreground="White" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Editor Area -->
+        <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+            <Grid>
+                <Image x:Name="ImgPreview" Stretch="None" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+                <InkCanvas x:Name="DrawingCanvas" Background="Transparent" 
+                           MouseDown="DrawingCanvas_MouseDown"
+                           MouseMove="DrawingCanvas_MouseMove"
+                           MouseUp="DrawingCanvas_MouseUp">
+                    <InkCanvas.DefaultDrawingAttributes>
+                        <DrawingAttributes Color="Red" Width="3" Height="3"/>
+                    </InkCanvas.DefaultDrawingAttributes>
+                </InkCanvas>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</Window>
