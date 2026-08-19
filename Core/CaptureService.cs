@@ -17,5 +17,15 @@ namespace UNICUT.Core
 
             return bitmap;
         }
+
+        public Bitmap CaptureFullScreen()
+        {
+            var bounds = System.Windows.Forms.SystemInformation.VirtualScreen;
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                bounds = new Rectangle(0, 0, 1920, 1080);
+            }
+            return CaptureRegion(bounds);
+        }
     }
 }

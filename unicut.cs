@@ -108,16 +108,29 @@ namespace UNICUT
 
         private void OnHotkeyPressed()
         {
-            if (_overlayWindow == null || !_overlayWindow.IsLoaded)
-            {
-                _overlayWindow = new OverlayWindow();
-                _overlayWindow.Closed += (s, e) => _overlayWindow = null;
-                _overlayWindow.Show();
-            }
-            else
+            if (_overlayWindow != null && _overlayWindow.IsLoaded)
             {
                 _overlayWindow.Activate();
+                return;
             }
+
+            // 1. Instantly capture the full desktop BEFORE showing or focusing any window
+            // This freezes all tooltips, hover states, context menus, and active controls!
+            var bounds = System.Windows.Forms.SystemInformation.VirtualScreen;
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                bounds = new System.Drawing.Rectangle(0, 0, 1920, 1080);
+            }
+
+            var captureService = new CaptureService();
+            var fullSnapshot = captureService.CaptureRegion(bounds);
+            if (fullSnapshot == null) return;
+
+            // 2. Open OverlayWindow with the pre-captured snapshot
+            _overlayWindow = new OverlayWindow(fullSnapshot, bounds);
+            _overlayWindow.Closed += (s, e) => _overlayWindow = null;
+            _overlayWindow.Show();
+            _overlayWindow.Activate();
         }
 
         private void ExitApplication()
@@ -184,6 +197,16 @@ namespace UNICUT
             }
             return bitmap;
         }
+
+        public Bitmap CaptureFullScreen()
+        {
+            var bounds = System.Windows.Forms.SystemInformation.VirtualScreen;
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                bounds = new System.Drawing.Rectangle(0, 0, 1920, 1080);
+            }
+            return CaptureRegion(bounds);
+        }
     }
 
     public static class GlobalEvents
@@ -205,7 +228,7 @@ namespace UNICUT
                 string picturesFolder = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
                 string unicutFolder = System.IO.Path.Combine(picturesFolder, "UNICUT");
                 if (!Directory.Exists(unicutFolder)) Directory.CreateDirectory(unicutFolder);
-                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmssfff");
                 string filePath = System.IO.Path.Combine(unicutFolder, "unicut_" + timestamp + ".png");
                 bitmap.Save(filePath, System.Drawing.Imaging.ImageFormat.Png);
                 return filePath;
@@ -216,19 +239,33 @@ namespace UNICUT
 
     public static class ClipboardHelper
     {
+        public static void CopyPath(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+            string quotedPath = "\"" + filePath.Trim('\"') + "\"";
+            CopyText(quotedPath);
+        }
+
         public static void CopyText(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
-            try { System.Windows.Clipboard.SetText(text); } catch { }
+            for (int i = 0; i < 5; i++)
+            {
+                try
+                {
+                    System.Windows.Clipboard.SetText(text);
+                    return;
+                }
+                catch
+                {
+                    System.Threading.Thread.Sleep(50);
+                }
+            }
         }
 
         public static void CopyImage(string filePath)
         {
-            if (string.IsNullOrEmpty(filePath)) return;
-            try { 
-                var bitmap = new BitmapImage(new Uri(filePath, UriKind.Absolute));
-                System.Windows.Clipboard.SetImage(bitmap); 
-            } catch { }
+            CopyPath(filePath);
         }
     }
 
@@ -241,9 +278,62 @@ namespace UNICUT
         }
     }
 
+    public class WidgetIconButton : Border
+    {
+        public System.Windows.Shapes.Path IconPath { get; private set; }
+        public event Action Clicked;
+
+        public WidgetIconButton(string pathData, string tooltip, double width, double height, double iconSize = 12)
+        {
+            this.Width = width;
+            this.Height = height;
+            this.Margin = new Thickness(1, 0, 1, 0);
+            this.Background = Brushes.Transparent;
+            this.CornerRadius = new CornerRadius(width / 2);
+            this.Cursor = System.Windows.Input.Cursors.Hand;
+            this.ToolTip = tooltip;
+
+            IconPath = new System.Windows.Shapes.Path
+            {
+                Data = System.Windows.Media.Geometry.Parse(pathData),
+                Stroke = Brushes.White,
+                StrokeThickness = 1.5,
+                StrokeLineJoin = PenLineJoin.Round,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+                VerticalAlignment = System.Windows.VerticalAlignment.Center,
+                Stretch = Stretch.Uniform,
+                Width = iconSize,
+                Height = iconSize,
+                IsHitTestVisible = false
+            };
+
+            this.Child = IconPath;
+        }
+
+        public void TriggerClick()
+        {
+            if (Clicked != null) Clicked();
+        }
+    }
+
     public class FloatingWidgetWindow : Window
     {
         private StackPanel _historyStack;
+        private Border _buttonBorder;
+        private Border _historyBorder;
+        private WidgetIconButton _btnCapture;
+        private WidgetIconButton _btnOpen;
+        private WidgetIconButton _btnToggleHistory;
+        private WidgetIconButton _btnPurge;
+        private WidgetIconButton _btnClose;
+        private string _pathEye = "M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z M12 9a3 3 0 1 0 0 6 3 3 0 1 0 0-6z";
+        private string _pathEyeOff = "M9.88 9.88a3 3 0 1 0 4.24 4.24 M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68 M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61 M2 2l20 20";
+
+        private Point? _pressPoint;
+        private WidgetIconButton _pressedButton;
+        private bool _isDraggingNow;
 
         public FloatingWidgetWindow(Action onCapture)
         {
@@ -252,52 +342,69 @@ namespace UNICUT
             this.Background = Brushes.Transparent;
             this.Topmost = true;
             this.ShowInTaskbar = false;
-            this.Width = 88;
-            this.SizeToContent = SizeToContent.Height;
+            this.ResizeMode = ResizeMode.NoResize;
+            this.SizeToContent = SizeToContent.WidthAndHeight;
 
-            this.Left = SystemParameters.WorkArea.Left + 20;
-            
-            this.SizeChanged += (s, e) => {
-                if (e.HeightChanged) {
-                    this.Top = SystemParameters.WorkArea.Bottom - this.ActualHeight - 20;
-                }
+            // Initial positioning: bottom-left corner of work area
+            this.Loaded += (s, e) => {
+                this.Left = SystemParameters.WorkArea.Left + 16;
+                this.Top = SystemParameters.WorkArea.Bottom - this.ActualHeight - 20;
             };
 
-            var mainStack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Vertical };
-
-            var historyBorder = new Border
+            var mainStack = new StackPanel
             {
-                Margin = new Thickness(0, 0, 0, 10),
-                Visibility = Visibility.Collapsed
+                Orientation = System.Windows.Controls.Orientation.Vertical,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center
             };
 
-            var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, MaxHeight = 300, Margin = new Thickness(5) };
+            // History Thumbnails container
+            _historyBorder = new Border
+            {
+                Visibility = Visibility.Collapsed,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center
+            };
+
+            var scroll = new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                MaxHeight = 240,
+                Margin = new Thickness(0)
+            };
             _historyStack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Vertical };
             scroll.Content = _historyStack;
-            historyBorder.Child = scroll;
+            _historyBorder.Child = scroll;
 
-            var buttonBorder = new Border
+            // 1x5 Horizontal Pill Capsule (30% smaller: height 28px, buttons 24x24px)
+            _buttonBorder = new Border
             {
-                Height = 88,
-                CornerRadius = new CornerRadius(16),
-                Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(200, 32, 32, 32)),
-                BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(150, 65, 65, 65)),
+                Height = 28,
+                CornerRadius = new CornerRadius(14),
+                Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(230, 28, 28, 28)),
+                BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(180, 65, 65, 65)),
                 BorderThickness = new Thickness(1),
-                Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 10, Opacity = 0.5, ShadowDepth = 2 }
+                Padding = new Thickness(2),
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+                Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 8, Opacity = 0.45, ShadowDepth = 1 }
             };
 
-            var btnGrid = new Grid { HorizontalAlignment = System.Windows.HorizontalAlignment.Center, VerticalAlignment = System.Windows.VerticalAlignment.Center };
-            btnGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            btnGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            btnGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            btnGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            
-            var btnCapture = CreateWidgetSvgButton("M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "Capture", 32, 32);
-            btnCapture.Click += (s, e) => onCapture();
+            var btnPanel = new StackPanel
+            {
+                Orientation = System.Windows.Controls.Orientation.Horizontal,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+                VerticalAlignment = System.Windows.VerticalAlignment.Center
+            };
 
-            var btnToggleHistory = CreateWidgetSvgButton("M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z M12 9a3 3 0 1 0 0 6 3 3 0 1 0 0-6z", "Toggle History", 32, 32);
-            var btnOpen = CreateWidgetSvgButton("M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z M2 10h20", "Open Existing Image", 32, 32);
-            btnOpen.Click += (s, e) => {
+            _btnCapture = new WidgetIconButton("M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "Capture (Ctrl+Shift+S)", 24, 24, 12);
+            _btnCapture.Clicked += async () => {
+                this.Opacity = 0;
+                await System.Threading.Tasks.Task.Delay(50);
+                onCapture();
+                this.Opacity = 1;
+            };
+
+            _btnOpen = new WidgetIconButton("M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z M2 10h20", "Open Existing Image", 24, 24, 12);
+            _btnOpen.Clicked += () => {
                 string folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "UNICUT");
                 if (System.IO.Directory.Exists(folder)) {
                     var lastFile = new System.IO.DirectoryInfo(folder).GetFiles("*.png").OrderByDescending(f => f.CreationTime).FirstOrDefault();
@@ -309,235 +416,340 @@ namespace UNICUT
                 }
                 System.Windows.MessageBox.Show("No captures found.", "UNICUT", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
             };
-            var btnClose = CreateWidgetSvgButton("M18 6 6 18 M6 6l12 12", "Hide Widget", 32, 32, 11);
-            
-            btnCapture.Margin = new Thickness(2);
-            btnOpen.Margin = new Thickness(2);
-            btnToggleHistory.Margin = new Thickness(2);
-            btnClose.Margin = new Thickness(2);
 
-            Grid.SetRow(btnCapture, 0); Grid.SetColumn(btnCapture, 0);
-            Grid.SetRow(btnOpen, 0); Grid.SetColumn(btnOpen, 1);
-            Grid.SetRow(btnToggleHistory, 1); Grid.SetColumn(btnToggleHistory, 0);
-            Grid.SetRow(btnClose, 1); Grid.SetColumn(btnClose, 1);
+            _btnToggleHistory = new WidgetIconButton(_pathEye, "Toggle History", 24, 24, 12);
+            _btnPurge = new WidgetIconButton("M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2 M10 11v6 M14 11v6", "Clean Up Session (Purge Previews)", 24, 24, 11);
+            _btnClose = new WidgetIconButton("M18 6 6 18 M6 6l12 12", "Hide Widget", 24, 24, 9);
 
-            string pathEye = "M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z M12 9a3 3 0 1 0 0 6 3 3 0 1 0 0-6z";
-            string pathEyeOff = "M9.88 9.88a3 3 0 1 0 4.24 4.24 M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68 M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61 M2 2l20 20";
+            _btnPurge.Clicked += () => {
+                double curBottom = this.Top + this.ActualHeight;
+                _historyStack.Children.Clear();
+                _historyBorder.Visibility = Visibility.Collapsed;
+                this.UpdateLayout();
+                this.Top = curBottom - this.ActualHeight;
+            };
 
-            btnToggleHistory.Click += (s, e) => {
-                if (btnCapture.Visibility == Visibility.Visible) {
-                    btnCapture.Visibility = Visibility.Collapsed;
-                    btnOpen.Visibility = Visibility.Collapsed;
-                    btnClose.Visibility = Visibility.Collapsed;
-                    historyBorder.Visibility = Visibility.Collapsed;
-                    this.Width = 44;
-                    buttonBorder.Height = 44;
-                    buttonBorder.CornerRadius = new CornerRadius(22);
-                    ((System.Windows.Shapes.Path)btnToggleHistory.Content).Data = System.Windows.Media.Geometry.Parse(pathEyeOff);
+            _btnToggleHistory.Clicked += () => {
+                if (_btnCapture.Visibility == Visibility.Visible) {
+                    _btnCapture.Visibility = Visibility.Collapsed;
+                    _btnOpen.Visibility = Visibility.Collapsed;
+                    _btnPurge.Visibility = Visibility.Collapsed;
+                    _btnClose.Visibility = Visibility.Collapsed;
+                    _historyBorder.Visibility = Visibility.Collapsed;
+                    _buttonBorder.Width = 28;
+                    _btnToggleHistory.IconPath.Data = System.Windows.Media.Geometry.Parse(_pathEyeOff);
                 } else {
-                    btnCapture.Visibility = Visibility.Visible;
-                    btnOpen.Visibility = Visibility.Visible;
-                    btnClose.Visibility = Visibility.Visible;
-                    this.Width = 88;
-                    buttonBorder.Height = 88;
-                    buttonBorder.CornerRadius = new CornerRadius(16);
-                    ((System.Windows.Shapes.Path)btnToggleHistory.Content).Data = System.Windows.Media.Geometry.Parse(pathEye);
+                    _btnCapture.Visibility = Visibility.Visible;
+                    _btnOpen.Visibility = Visibility.Visible;
+                    _btnPurge.Visibility = Visibility.Visible;
+                    _btnClose.Visibility = Visibility.Visible;
+                    _buttonBorder.Width = double.NaN;
+                    _btnToggleHistory.IconPath.Data = System.Windows.Media.Geometry.Parse(_pathEye);
                     if (_historyStack.Children.Count > 0) {
-                        historyBorder.Visibility = Visibility.Visible;
-                        scroll.ScrollToBottom();
+                        double curB = this.Top + this.ActualHeight;
+                        _historyBorder.Visibility = Visibility.Visible;
+                        this.UpdateLayout();
+                        this.Top = curB - this.ActualHeight;
                     }
                 }
             };
-            btnClose.Click += (s, e) => {
+
+            _btnClose.Clicked += () => {
                 _historyStack.Children.Clear();
-                historyBorder.Visibility = Visibility.Collapsed;
-                ((System.Windows.Shapes.Path)btnToggleHistory.Content).Data = System.Windows.Media.Geometry.Parse(pathEye);
+                _historyBorder.Visibility = Visibility.Collapsed;
+                _btnToggleHistory.IconPath.Data = System.Windows.Media.Geometry.Parse(_pathEye);
                 this.Hide();
             };
 
-            btnCapture.MouseEnter += (s, e) => btnCapture.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(100, 0, 120, 215));
-            btnCapture.MouseLeave += (s, e) => btnCapture.Background = Brushes.Transparent;
-            btnOpen.MouseEnter += (s, e) => btnOpen.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(100, 0, 120, 215));
-            btnOpen.MouseLeave += (s, e) => btnOpen.Background = Brushes.Transparent;
-            btnToggleHistory.MouseEnter += (s, e) => btnToggleHistory.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(100, 128, 128, 128));
-            btnToggleHistory.MouseLeave += (s, e) => btnToggleHistory.Background = Brushes.Transparent;
-            btnClose.MouseEnter += (s, e) => { btnClose.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(220, 53, 69)); ((System.Windows.Shapes.Path)btnClose.Content).Stroke = Brushes.White; };
-            btnClose.MouseLeave += (s, e) => { btnClose.Background = Brushes.Transparent; };
+            // Hover styling
+            _btnCapture.MouseEnter += (s, e) => _btnCapture.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(120, 0, 120, 215));
+            _btnCapture.MouseLeave += (s, e) => _btnCapture.Background = Brushes.Transparent;
+            _btnOpen.MouseEnter += (s, e) => _btnOpen.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(120, 0, 120, 215));
+            _btnOpen.MouseLeave += (s, e) => _btnOpen.Background = Brushes.Transparent;
+            _btnToggleHistory.MouseEnter += (s, e) => _btnToggleHistory.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(120, 128, 128, 128));
+            _btnToggleHistory.MouseLeave += (s, e) => _btnToggleHistory.Background = Brushes.Transparent;
+            _btnPurge.MouseEnter += (s, e) => _btnPurge.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(120, 220, 110, 0));
+            _btnPurge.MouseLeave += (s, e) => _btnPurge.Background = Brushes.Transparent;
+            _btnClose.MouseEnter += (s, e) => { _btnClose.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(220, 53, 69)); _btnClose.IconPath.Stroke = Brushes.White; };
+            _btnClose.MouseLeave += (s, e) => { _btnClose.Background = Brushes.Transparent; };
 
-            btnGrid.Children.Add(btnCapture);
-            btnGrid.Children.Add(btnOpen);
-            btnGrid.Children.Add(btnToggleHistory);
-            btnGrid.Children.Add(btnClose);
-            buttonBorder.Child = btnGrid;
+            btnPanel.Children.Add(_btnCapture);
+            btnPanel.Children.Add(_btnOpen);
+            btnPanel.Children.Add(_btnToggleHistory);
+            btnPanel.Children.Add(_btnPurge);
+            btnPanel.Children.Add(_btnClose);
+            _buttonBorder.Child = btnPanel;
 
-            buttonBorder.MouseLeftButtonDown += (s, e) => this.DragMove();
+            // Universal Drag Handler across entire buttonBorder (including over all icons!)
+            _buttonBorder.MouseLeftButtonDown += (s, e) => {
+                _pressPoint = e.GetPosition(this);
+                _isDraggingNow = false;
 
-            mainStack.Children.Add(historyBorder);
-            mainStack.Children.Add(buttonBorder);
+                var hit = e.OriginalSource as DependencyObject;
+                _pressedButton = null;
+                while (hit != null && hit != _buttonBorder)
+                {
+                    var btn = hit as WidgetIconButton;
+                    if (btn != null)
+                    {
+                        _pressedButton = btn;
+                        break;
+                    }
+                    hit = VisualTreeHelper.GetParent(hit);
+                }
+            };
+
+            _buttonBorder.MouseMove += (s, e) => {
+                if (e.LeftButton == MouseButtonState.Pressed && _pressPoint.HasValue)
+                {
+                    var cur = e.GetPosition(this);
+                    double dx = Math.Abs(cur.X - _pressPoint.Value.X);
+                    double dy = Math.Abs(cur.Y - _pressPoint.Value.Y);
+
+                    if (dx > 2 || dy > 2)
+                    {
+                        _isDraggingNow = true;
+                        _pressedButton = null;
+                        try
+                        {
+                            this.DragMove();
+                        }
+                        catch { }
+                        _pressPoint = null;
+                    }
+                }
+            };
+
+            _buttonBorder.MouseLeftButtonUp += (s, e) => {
+                if (!_isDraggingNow && _pressedButton != null)
+                {
+                    _pressedButton.TriggerClick();
+                }
+                _pressPoint = null;
+                _pressedButton = null;
+                _isDraggingNow = false;
+            };
+
+            mainStack.Children.Add(_historyBorder);
+            mainStack.Children.Add(_buttonBorder);
 
             this.Content = mainStack;
 
             GlobalEvents.OnCaptureSaved += (filePath) => {
                 Application.Current.Dispatcher.Invoke(new Action(() => {
-                    historyBorder.Visibility = Visibility.Visible;
+                    double curBottom = this.Top + this.ActualHeight;
+
+                    _historyStack.Children.Clear();
+
                     var thumbBorder = new Border {
-                        Margin = new Thickness(0, 0, 0, 10),
+                        Width = 108,
+                        Height = 68,
+                        Margin = new Thickness(0, 0, 0, 8),
                         CornerRadius = new CornerRadius(8),
-                        Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(200, 32, 32, 32)),
-                        BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(150, 65, 65, 65)),
+                        Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(235, 26, 26, 26)),
+                        BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(180, 70, 70, 70)),
                         BorderThickness = new Thickness(1),
                         ClipToBounds = true,
                         Cursor = System.Windows.Input.Cursors.Hand,
-                        ToolTip = "Click to Copy / Drag to Drop",
-                        Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 10, Opacity = 0.5, ShadowDepth = 2 },
-                        Padding = new Thickness(4)
+                        ToolTip = "Click to Copy | Drag to Drop",
+                        Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 12, Opacity = 0.55, ShadowDepth = 2 },
+                        Padding = new Thickness(4),
+                        HorizontalAlignment = System.Windows.HorizontalAlignment.Center
                     };
-                    
+
                     var bi = new BitmapImage();
                     bi.BeginInit();
                     bi.CacheOption = BitmapCacheOption.OnLoad;
-                    bi.DecodePixelWidth = 80;
+                    bi.DecodePixelWidth = 120;
                     bi.UriSource = new Uri(filePath);
                     bi.EndInit();
+                    bi.Freeze();
 
                     var thumbGrid = new Grid();
-                    var img = new System.Windows.Controls.Image { Source = bi, Width = 70, Height = 50, Stretch = Stretch.UniformToFill };
+                    var img = new System.Windows.Controls.Image { Source = bi, Width = 100, Height = 60, Stretch = Stretch.UniformToFill };
                     thumbGrid.Children.Add(img);
 
-                    var closeBtn = new System.Windows.Controls.Button {
-                        Width = 16, Height = 16,
-                        Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(200, 220, 53, 69)),
-                        BorderThickness = new Thickness(0),
-                        HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
-                        VerticalAlignment = System.Windows.VerticalAlignment.Top,
-                        Margin = new Thickness(0,-2,-2,0),
-                        Cursor = System.Windows.Input.Cursors.Hand, ToolTip = "Remove from history"
-                    };
-                    var path = new System.Windows.Shapes.Path {
-                        Data = System.Windows.Media.Geometry.Parse("M18 6 6 18 M6 6l12 12"),
-                        Stroke = Brushes.White, StrokeThickness = 1.5,
-                        StrokeLineJoin = PenLineJoin.Round, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round,
-                        HorizontalAlignment = System.Windows.HorizontalAlignment.Center, VerticalAlignment = System.Windows.VerticalAlignment.Center,
-                        Stretch = Stretch.Uniform, Width = 8, Height = 8
-                    };
-                    closeBtn.Content = path;
-                    ApplyIconTemplate(closeBtn);
-                    
-                    closeBtn.MouseEnter += (senderBtn, args) => closeBtn.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 50, 50));
-                    closeBtn.MouseLeave += (senderBtn, args) => closeBtn.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(200, 220, 53, 69));
+                    var closeBtn = new WidgetIconButton("M18 6 6 18 M6 6l12 12", "Dismiss", 16, 16, 8);
+                    closeBtn.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(220, 220, 53, 69));
+                    closeBtn.HorizontalAlignment = System.Windows.HorizontalAlignment.Right;
+                    closeBtn.VerticalAlignment = System.Windows.VerticalAlignment.Top;
+                    closeBtn.Margin = new Thickness(0, -2, -2, 0);
 
-                    closeBtn.Click += (senderBtn, args) => {
-                        _historyStack.Children.Remove(thumbBorder);
+                    closeBtn.MouseEnter += (senderBtn, args) => closeBtn.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 50, 50));
+                    closeBtn.MouseLeave += (senderBtn, args) => closeBtn.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(220, 220, 53, 69));
+
+                    closeBtn.Clicked += () => {
+                        double closeBottom = this.Top + this.ActualHeight;
+                        _historyStack.Children.Clear();
+                        _historyBorder.Visibility = Visibility.Collapsed;
+                        this.UpdateLayout();
+                        this.Top = closeBottom - this.ActualHeight;
                     };
 
                     thumbGrid.Children.Add(closeBtn);
                     thumbBorder.Child = thumbGrid;
 
-                    Point? dragStartPoint = null;
+                    Point? thumbDragStart = null;
 
-                    thumbBorder.PreviewMouseLeftButtonDown += (s, e) => {
-                        dragStartPoint = e.GetPosition(null);
+                    thumbBorder.MouseLeftButtonDown += (s, e) => {
+                        thumbDragStart = e.GetPosition(null);
                     };
 
-                    thumbBorder.PreviewMouseMove += (s, e) => {
-                        if (e.LeftButton == MouseButtonState.Pressed && dragStartPoint.HasValue) {
+                    thumbBorder.MouseMove += (s, e) => {
+                        if (e.LeftButton == MouseButtonState.Pressed && thumbDragStart.HasValue) {
                             var pos = e.GetPosition(null);
-                            if (Math.Abs(pos.X - dragStartPoint.Value.X) > SystemParameters.MinimumHorizontalDragDistance ||
-                                Math.Abs(pos.Y - dragStartPoint.Value.Y) > SystemParameters.MinimumVerticalDragDistance) {
+                            if (Math.Abs(pos.X - thumbDragStart.Value.X) > SystemParameters.MinimumHorizontalDragDistance ||
+                                Math.Abs(pos.Y - thumbDragStart.Value.Y) > SystemParameters.MinimumVerticalDragDistance) {
                                 
                                 var data = new System.Windows.DataObject();
                                 data.SetData(System.Windows.DataFormats.FileDrop, new string[] { filePath });
                                 data.SetData(System.Windows.DataFormats.Text, filePath);
                                 System.Windows.DragDrop.DoDragDrop(thumbBorder, data, System.Windows.DragDropEffects.Copy);
-                                dragStartPoint = null;
+                                thumbDragStart = null;
                             }
                         }
                     };
 
-                    thumbBorder.PreviewMouseLeftButtonUp += (s, e) => {
-                        dragStartPoint = null;
-                        ClipboardHelper.CopyImage(filePath);
+                    thumbBorder.MouseLeftButtonUp += (s, e) => {
+                        if (thumbDragStart.HasValue) {
+                            ClipboardHelper.CopyImage(filePath);
+                        }
+                        thumbDragStart = null;
                     };
 
                     _historyStack.Children.Add(thumbBorder);
-                    scroll.ScrollToBottom();
-                    
-                    btnCapture.Visibility = Visibility.Visible;
-                    btnOpen.Visibility = Visibility.Visible;
-                    btnClose.Visibility = Visibility.Visible;
-                    this.Width = 88;
-                    buttonBorder.Height = 88;
-                    buttonBorder.CornerRadius = new CornerRadius(16);
-                    ((System.Windows.Shapes.Path)btnToggleHistory.Content).Data = System.Windows.Media.Geometry.Parse("M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z M12 9a3 3 0 1 0 0 6 3 3 0 1 0 0-6z");
+                    _historyBorder.Visibility = Visibility.Visible;
+
+                    _btnCapture.Visibility = Visibility.Visible;
+                    _btnOpen.Visibility = Visibility.Visible;
+                    _btnPurge.Visibility = Visibility.Visible;
+                    _btnClose.Visibility = Visibility.Visible;
+                    _buttonBorder.Width = double.NaN;
+                    _btnToggleHistory.IconPath.Data = System.Windows.Media.Geometry.Parse(_pathEye);
+
+                    this.UpdateLayout();
+                    this.Top = curBottom - this.ActualHeight;
                 }));
             };
-        }
-
-        private System.Windows.Controls.Button CreateWidgetSvgButton(string pathData, string tooltip, double width, double height, double iconSize = 16)
-        {
-            var btn = new System.Windows.Controls.Button
-            {
-                Width = width, Height = height, Margin = new Thickness(0,0,5,0),
-                Background = Brushes.Transparent, BorderThickness = new Thickness(0),
-                Cursor = System.Windows.Input.Cursors.Hand, ToolTip = tooltip
-            };
-            
-            var path = new System.Windows.Shapes.Path {
-                Data = System.Windows.Media.Geometry.Parse(pathData),
-                Stroke = Brushes.White, StrokeThickness = 1.8,
-                StrokeLineJoin = PenLineJoin.Round, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round,
-                HorizontalAlignment = System.Windows.HorizontalAlignment.Center, VerticalAlignment = System.Windows.VerticalAlignment.Center,
-                Stretch = Stretch.Uniform, Width = iconSize, Height = iconSize
-            };
-            btn.Content = path;
-
-            ApplyIconTemplate(btn);
-            return btn;
-        }
-
-        private void ApplyIconTemplate(System.Windows.Controls.Button btn)
-        {
-            var template = new ControlTemplate(typeof(System.Windows.Controls.Button));
-            var b = new FrameworkElementFactory(typeof(Border));
-            b.SetValue(Border.CornerRadiusProperty, new CornerRadius(16));
-            b.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(System.Windows.Controls.Button.BackgroundProperty));
-            var cp = new FrameworkElementFactory(typeof(ContentPresenter));
-            cp.SetValue(ContentPresenter.HorizontalAlignmentProperty, System.Windows.HorizontalAlignment.Center);
-            cp.SetValue(ContentPresenter.VerticalAlignmentProperty, System.Windows.VerticalAlignment.Center);
-            b.AppendChild(cp);
-            template.VisualTree = b;
-            btn.Template = template;
         }
     }
 
     public class OverlayWindow : Window
     {
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        private System.Drawing.Bitmap _fullSnapshot;
+        private System.Drawing.Rectangle _virtualBounds;
+        private BitmapSource _snapshotSource;
+
         private Canvas OverlayCanvas;
-        private Rectangle SelectionRectangle;
+        private System.Windows.Controls.Image _bgImage;
+        private System.Windows.Shapes.Path _maskPath;
+        private RectangleGeometry _fullScreenGeom;
+        private RectangleGeometry _selectionGeom;
+        private CombinedGeometry _maskGeom;
+        private Rectangle _selectionBorder;
+        private Border _dimensionBadge;
+        private TextBlock _dimensionText;
         private Point _startPoint;
         private bool _isSelecting;
         private Border _topPanel;
 
-        public OverlayWindow()
+        public OverlayWindow(System.Drawing.Bitmap snapshot, System.Drawing.Rectangle virtualBounds)
         {
+            _fullSnapshot = snapshot;
+            _virtualBounds = virtualBounds;
+
             this.WindowStyle = WindowStyle.None;
             this.AllowsTransparency = true;
-            this.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0x60, 0x00, 0x00, 0x00));
+            this.Background = Brushes.Black;
             this.Topmost = true;
             this.ShowInTaskbar = false;
-            this.Cursor = System.Windows.Input.Cursors.Arrow;
+            this.Cursor = System.Windows.Input.Cursors.Cross;
 
-            OverlayCanvas = new Canvas();
-            SelectionRectangle = new Rectangle {
-                Stroke = Brushes.White,
-                StrokeThickness = 1,
-                StrokeDashArray = new DoubleCollection { 4, 4 },
-                Fill = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0x20, 0xFF, 0xFF, 0xFF)),
-                Visibility = Visibility.Collapsed
+            this.Left = SystemParameters.VirtualScreenLeft;
+            this.Top = SystemParameters.VirtualScreenTop;
+            this.Width = SystemParameters.VirtualScreenWidth;
+            this.Height = SystemParameters.VirtualScreenHeight;
+
+            _snapshotSource = ConvertBitmapToSource(_fullSnapshot);
+
+            var rootGrid = new Grid();
+
+            // Layer 1: Frozen Desktop Snapshot Image
+            _bgImage = new System.Windows.Controls.Image
+            {
+                Source = _snapshotSource,
+                Stretch = Stretch.Fill,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch,
+                VerticalAlignment = System.Windows.VerticalAlignment.Stretch
             };
-            OverlayCanvas.Children.Add(SelectionRectangle);
+            rootGrid.Children.Add(_bgImage);
 
-            _topPanel = new Border
+            // Layer 2: Dark semi-transparent mask with cutout
+            _fullScreenGeom = new RectangleGeometry(new Rect(0, 0, this.Width, this.Height));
+            _selectionGeom = new RectangleGeometry(new Rect(0, 0, 0, 0));
+            _maskGeom = new CombinedGeometry(GeometryCombineMode.Exclude, _fullScreenGeom, _selectionGeom);
+
+            _maskPath = new System.Windows.Shapes.Path
+            {
+                Fill = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0x75, 0x00, 0x00, 0x00)),
+                Data = _maskGeom,
+                IsHitTestVisible = false
+            };
+            rootGrid.Children.Add(_maskPath);
+
+            // Layer 3: Interaction Canvas
+            OverlayCanvas = new Canvas { Background = Brushes.Transparent };
+
+            _selectionBorder = new Rectangle
+            {
+                Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 150, 255)),
+                StrokeThickness = 2,
+                StrokeDashArray = new DoubleCollection { 4, 2 },
+                Visibility = Visibility.Collapsed,
+                IsHitTestVisible = false
+            };
+            OverlayCanvas.Children.Add(_selectionBorder);
+
+            _dimensionBadge = new Border
+            {
+                CornerRadius = new CornerRadius(4),
+                Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(220, 20, 20, 20)),
+                BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(180, 80, 80, 80)),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(6, 2, 6, 2),
+                Visibility = Visibility.Collapsed,
+                IsHitTestVisible = false
+            };
+            _dimensionText = new TextBlock
+            {
+                Foreground = Brushes.White,
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                FontFamily = new System.Windows.Media.FontFamily("Segoe UI, sans-serif")
+            };
+            _dimensionBadge.Child = _dimensionText;
+            OverlayCanvas.Children.Add(_dimensionBadge);
+
+            _topPanel = CreateTopPanel();
+            OverlayCanvas.Children.Add(_topPanel);
+
+            rootGrid.Children.Add(OverlayCanvas);
+            this.Content = rootGrid;
+
+            this.Loaded += Window_Loaded;
+            this.MouseDown += Window_MouseDown;
+            this.MouseMove += Window_MouseMove;
+            this.MouseUp += Window_MouseUp;
+            this.KeyDown += Window_KeyDown;
+            this.Closed += Window_Closed;
+        }
+
+        private Border CreateTopPanel()
+        {
+            var topPanel = new Border
             {
                 CornerRadius = new CornerRadius(8),
                 Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(30, 30, 30)),
@@ -549,63 +761,68 @@ namespace UNICUT
             };
 
             var stack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
-            
             var fontFam = new System.Windows.Media.FontFamily("Segoe UI Variable Text, Segoe UI, sans-serif");
-            
-            var lblRegion = new System.Windows.Controls.TextBlock { 
-                Text = "Drag to cut region or:", 
-                Foreground = Brushes.LightGray, 
+
+            var lblRegion = new System.Windows.Controls.TextBlock
+            {
+                Text = "Drag to cut region or:",
+                Foreground = Brushes.LightGray,
                 FontFamily = fontFam,
                 FontSize = 13,
-                VerticalAlignment = System.Windows.VerticalAlignment.Center, 
-                Margin = new Thickness(10,0,15,0) 
+                VerticalAlignment = System.Windows.VerticalAlignment.Center,
+                Margin = new Thickness(10, 0, 15, 0)
             };
 
             var btnRegion = CreateStyledButton("Region", 85, System.Windows.Media.Color.FromRgb(0, 120, 215), System.Windows.Media.Color.FromRgb(30, 150, 255), fontFam);
-            btnRegion.Margin = new Thickness(0,0,8,0);
-            
+            btnRegion.Margin = new Thickness(0, 0, 8, 0);
+
             var btnFull = CreateStyledButton("Fullscreen", 85, System.Windows.Media.Color.FromRgb(55, 55, 55), System.Windows.Media.Color.FromRgb(75, 75, 75), fontFam);
-            btnFull.Margin = new Thickness(0,0,8,0);
+            btnFull.Margin = new Thickness(0, 0, 8, 0);
 
             var btnCancel = CreateStyledButton("Cancel", 70, System.Windows.Media.Color.FromRgb(55, 55, 55), System.Windows.Media.Color.FromRgb(220, 53, 69), fontFam);
 
-            btnFull.Click += async (s,e) => {
-                this.Hide();
-                await System.Threading.Tasks.Task.Delay(150);
-                
-                var bounds = new System.Drawing.Rectangle(
-                    System.Windows.Forms.SystemInformation.VirtualScreen.Left,
-                    System.Windows.Forms.SystemInformation.VirtualScreen.Top,
-                    System.Windows.Forms.SystemInformation.VirtualScreen.Width,
-                    System.Windows.Forms.SystemInformation.VirtualScreen.Height);
-                    
-                if (bounds.Width <= 0) bounds.Width = 1920;
-                if (bounds.Height <= 0) bounds.Height = 1080;
-
-                PerformCapture(bounds);
+            btnFull.Click += (s, e) => {
+                if (_fullSnapshot != null)
+                {
+                    Bitmap fullCopy = _fullSnapshot.Clone(new System.Drawing.Rectangle(0, 0, _fullSnapshot.Width, _fullSnapshot.Height), _fullSnapshot.PixelFormat);
+                    ProcessFinishedCapture(fullCopy);
+                }
             };
 
-            btnRegion.Click += (s,e) => {
-                _topPanel.Visibility = Visibility.Collapsed;
+            btnRegion.Click += (s, e) => {
+                topPanel.Visibility = Visibility.Collapsed;
                 this.Cursor = System.Windows.Input.Cursors.Cross;
             };
 
-            btnCancel.Click += (s,e) => this.Close();
+            btnCancel.Click += (s, e) => this.Close();
 
             stack.Children.Add(lblRegion);
             stack.Children.Add(btnRegion);
             stack.Children.Add(btnFull);
             stack.Children.Add(btnCancel);
-            _topPanel.Child = stack;
+            topPanel.Child = stack;
 
-            OverlayCanvas.Children.Add(_topPanel);
-            this.Content = OverlayCanvas;
+            return topPanel;
+        }
 
-            this.Loaded += Window_Loaded;
-            this.MouseDown += Window_MouseDown;
-            this.MouseMove += Window_MouseMove;
-            this.MouseUp += Window_MouseUp;
-            this.KeyDown += Window_KeyDown;
+        private static BitmapSource ConvertBitmapToSource(Bitmap bitmap)
+        {
+            if (bitmap == null) return null;
+            IntPtr hBitmap = bitmap.GetHbitmap();
+            try
+            {
+                var bs = Imaging.CreateBitmapSourceFromHBitmap(
+                    hBitmap,
+                    IntPtr.Zero,
+                    Int32Rect.Empty,
+                    BitmapSizeOptions.FromEmptyOptions());
+                bs.Freeze();
+                return bs;
+            }
+            finally
+            {
+                DeleteObject(hBitmap);
+            }
         }
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -614,6 +831,8 @@ namespace UNICUT
             this.Top = SystemParameters.VirtualScreenTop;
             this.Width = SystemParameters.VirtualScreenWidth;
             this.Height = SystemParameters.VirtualScreenHeight;
+
+            _fullScreenGeom.Rect = new Rect(0, 0, this.Width, this.Height);
 
             _topPanel.UpdateLayout();
             Canvas.SetLeft(_topPanel, (this.Width - _topPanel.ActualWidth) / 2);
@@ -630,11 +849,17 @@ namespace UNICUT
                 _topPanel.Visibility = Visibility.Collapsed;
                 _startPoint = e.GetPosition(OverlayCanvas);
                 _isSelecting = true;
-                SelectionRectangle.Visibility = Visibility.Visible;
-                Canvas.SetLeft(SelectionRectangle, _startPoint.X);
-                Canvas.SetTop(SelectionRectangle, _startPoint.Y);
-                SelectionRectangle.Width = 0;
-                SelectionRectangle.Height = 0;
+
+                _selectionBorder.Visibility = Visibility.Visible;
+                _dimensionBadge.Visibility = Visibility.Visible;
+
+                Canvas.SetLeft(_selectionBorder, _startPoint.X);
+                Canvas.SetTop(_selectionBorder, _startPoint.Y);
+                _selectionBorder.Width = 0;
+                _selectionBorder.Height = 0;
+
+                _selectionGeom.Rect = new Rect(_startPoint.X, _startPoint.Y, 0, 0);
+
                 OverlayCanvas.CaptureMouse();
             }
         }
@@ -649,10 +874,26 @@ namespace UNICUT
                 var w = Math.Max(pos.X, _startPoint.X) - x;
                 var h = Math.Max(pos.Y, _startPoint.Y) - y;
 
-                Canvas.SetLeft(SelectionRectangle, x);
-                Canvas.SetTop(SelectionRectangle, y);
-                SelectionRectangle.Width = w;
-                SelectionRectangle.Height = h;
+                Canvas.SetLeft(_selectionBorder, x);
+                Canvas.SetTop(_selectionBorder, y);
+                _selectionBorder.Width = w;
+                _selectionBorder.Height = h;
+
+                _selectionGeom.Rect = new Rect(x, y, w, h);
+
+                if (_fullSnapshot != null && this.ActualWidth > 0 && this.ActualHeight > 0)
+                {
+                    double scaleX = (double)_fullSnapshot.Width / this.ActualWidth;
+                    double scaleY = (double)_fullSnapshot.Height / this.ActualHeight;
+                    int pixW = (int)(w * scaleX);
+                    int pixH = (int)(h * scaleY);
+                    _dimensionText.Text = string.Format("{0} × {1} px", pixW, pixH);
+
+                    double badgeTop = y + h + 6;
+                    if (badgeTop + 30 > this.ActualHeight) badgeTop = y - 26;
+                    Canvas.SetLeft(_dimensionBadge, x);
+                    Canvas.SetTop(_dimensionBadge, Math.Max(5, badgeTop));
+                }
             }
         }
 
@@ -663,19 +904,31 @@ namespace UNICUT
                 _isSelecting = false;
                 OverlayCanvas.ReleaseMouseCapture();
 
-                int w = (int)SelectionRectangle.Width;
-                int h = (int)SelectionRectangle.Height;
+                double x = Canvas.GetLeft(_selectionBorder);
+                double y = Canvas.GetTop(_selectionBorder);
+                double w = _selectionBorder.Width;
+                double h = _selectionBorder.Height;
 
-                if (w > 10 && h > 10)
+                if (w > 8 && h > 8 && _fullSnapshot != null && this.ActualWidth > 0 && this.ActualHeight > 0)
                 {
-                    int x = (int)Canvas.GetLeft(SelectionRectangle) + (int)this.Left;
-                    int y = (int)Canvas.GetTop(SelectionRectangle) + (int)this.Top;
-                    PerformCapture(new System.Drawing.Rectangle(x, y, w, h));
+                    double scaleX = (double)_fullSnapshot.Width / this.ActualWidth;
+                    double scaleY = (double)_fullSnapshot.Height / this.ActualHeight;
+
+                    int cropX = Math.Max(0, (int)(x * scaleX));
+                    int cropY = Math.Max(0, (int)(y * scaleY));
+                    int cropW = Math.Min(_fullSnapshot.Width - cropX, (int)(w * scaleX));
+                    int cropH = Math.Min(_fullSnapshot.Height - cropY, (int)(h * scaleY));
+
+                    if (cropW > 0 && cropH > 0)
+                    {
+                        var cropRect = new System.Drawing.Rectangle(cropX, cropY, cropW, cropH);
+                        Bitmap cropped = _fullSnapshot.Clone(cropRect, _fullSnapshot.PixelFormat);
+                        ProcessFinishedCapture(cropped);
+                        return;
+                    }
                 }
-                else
-                {
-                    this.Close();
-                }
+
+                this.Close();
             }
         }
 
@@ -684,24 +937,36 @@ namespace UNICUT
             if (e.Key == Key.Escape) this.Close();
         }
 
-        private void PerformCapture(System.Drawing.Rectangle bounds)
+        private void Window_Closed(object sender, EventArgs e)
+        {
+            if (_fullSnapshot != null)
+            {
+                _fullSnapshot.Dispose();
+                _fullSnapshot = null;
+            }
+        }
+
+        private void ProcessFinishedCapture(Bitmap croppedBmp)
         {
             try
             {
                 this.Hide();
 
-                var captureService = new CaptureService();
-                var bitmap = captureService.CaptureRegion(bounds);
+                var saveService = new SaveService();
+                string filePath = saveService.SaveBitmap(croppedBmp);
 
-                if (bitmap != null)
+                if (!string.IsNullOrEmpty(filePath))
                 {
-                    var editorPopup = new EditorPopup(bitmap);
-                    editorPopup.Show();
+                    ClipboardHelper.CopyImage(filePath);
+                    GlobalEvents.NotifyCaptureSaved(filePath);
                 }
+
+                var editorPopup = new EditorPopup(filePath, croppedBmp);
+                editorPopup.Show();
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Capture failed: " + ex.Message, "UNICUT Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show("Capture processing failed: " + ex.Message, "UNICUT Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
             {
@@ -761,16 +1026,19 @@ namespace UNICUT
         private System.Drawing.Bitmap _initialBitmap;
         private UndoRedoManager _undoRedoManager;
 
-        public EditorPopup(string filePath) : this((System.Drawing.Bitmap)null)
+        public EditorPopup(string filePath) : this(filePath, null)
         {
-            _filePath = filePath;
         }
 
-        public EditorPopup(System.Drawing.Bitmap bitmap)
+        public EditorPopup(System.Drawing.Bitmap bitmap) : this(null, bitmap)
+        {
+        }
+
+        public EditorPopup(string filePath, System.Drawing.Bitmap bitmap)
         {
             _undoRedoManager = new UndoRedoManager();
             _undoRedoManager.StateChanged += UpdateUndoRedoButtons;
-            _filePath = null;
+            _filePath = filePath;
             _initialBitmap = bitmap;
 
             this.Title = "UNICUT Editor";
@@ -850,7 +1118,7 @@ namespace UNICUT
             var btnFolder = CreateSvgButton("M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z", "Open Folder", false);
             btnFolder.Click += (s, e) => FileHelper.OpenFolderAndSelectFile(_filePath);
             
-            BtnSaveCopy = CreateSvgButton("M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21V13H7v8 M7 3v5h8", "Save & Copy to Clipboard", true);
+            BtnSaveCopy = CreateSvgButton("M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21V13H7v8 M7 3v5h8", "Save & Copy Path to Clipboard", true);
             BtnSaveCopy.Click += (s, e) => SaveEditedImage();
 
             var btnClose = CreateSvgButton("M18 6L6 18 M6 6l12 12", "Close", false);

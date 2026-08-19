@@ -6,31 +6,33 @@ namespace UNICUT.Utils
 {
     public static class ClipboardHelper
     {
+        public static void CopyPath(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+            string quotedPath = "\"" + filePath.Trim('\"') + "\"";
+            CopyText(quotedPath);
+        }
+
         public static void CopyText(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
-            try
+            for (int i = 0; i < 5; i++)
             {
-                Clipboard.SetText(text);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("Failed to copy text to clipboard: " + ex.Message);
+                try
+                {
+                    Clipboard.SetText(text);
+                    return;
+                }
+                catch
+                {
+                    System.Threading.Thread.Sleep(50);
+                }
             }
         }
 
         public static void CopyImage(string filePath)
         {
-            if (string.IsNullOrEmpty(filePath)) return;
-            try
-            {
-                var bitmap = new BitmapImage(new Uri(filePath, UriKind.Absolute));
-                Clipboard.SetImage(bitmap);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("Failed to copy image to clipboard: " + ex.Message);
-            }
+            CopyPath(filePath);
         }
     }
 }
