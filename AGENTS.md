@@ -51,3 +51,23 @@ This document outlines the mandatory operating rules, language consistency stand
 ### 3.2. Remote Push Policy - User Authorization Required
 * **NEVER push (`git push`) to the remote repository automatically**.
 * Only execute `git push` when the user **explicitly issues a command or grants direct approval** to push to remote.
+
+---
+
+## 4. Git Release Rules & Guidelines
+
+### 4.1. Release Format & Content
+* **Clean & Professional Formatting**:
+  - Keep release notes concise, clear, and structured.
+  - **Do NOT use emojis or decorative icons** in release titles or release descriptions.
+  - Structure release notes with standard markdown sections:
+    - Summary
+    - Key Features & Changes
+    - Bug Fixes & Improvements
+    - Download & Installation
+* Keep release notes in English.
+
+### 4.2. Mandatory Asset Upload
+* **Always attach the compiled standalone executable (`UNICUT.exe`)** as a binary release asset.
+* Ensure the binary is freshly compiled and verified via `cmd /c build.bat` before creating the release.
+* Follow semantic versioning tags (e.g., `v1.0.0`, `v1.1.0`).
